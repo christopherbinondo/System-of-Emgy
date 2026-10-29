@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Report an incident | Incident Desk</title>
+<script>
+  try {
+    var t = localStorage.getItem('incident-desk-theme');
+    if (t === 'dark' || (!t && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+      document.documentElement.setAttribute('data-theme', 'dark');
+    }
+  } catch (e) {}
+</script>
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
+<link rel="manifest" href="manifest.json">
+<link rel="stylesheet" href="style.css?v=5">
+</head>
+<body>
+<div class="content">
+  <header class="bar">
+    <div>
+      <h1><i data-lucide="plus-circle"></i>Report an incident</h1>
+      <p>Tell us what happened and where. Add a photo and Incident AI will describe it.</p>
+    </div>
+  </header>
+  <div id="alert" class="alert" hidden role="alert"></div>
+  <main class="single">
+    <section class="panel reveal" aria-labelledby="h-report">
+      <h2 id="h-report"><i data-lucide="clipboard-list"></i>Incident details</h2>
+      <form id="form">
+        <div class="row">
+          <label>Your name <input id="reporter" required maxlength="60" placeholder="e.g. John Doe"></label>
+          <label>Category <select id="category"></select></label>
+        </div>
+        <div class="row">
+          <label>Location <input id="location" required maxlength="80" placeholder="e.g. Gym, 2nd floor hallway"></label>
+          <label>Assign to staff <span class="small">(optional)</span><input id="assignee" maxlength="60" placeholder="e.g. Nurse Rivera"></label>
+        </div>
+        <label>What happened <textarea id="description" maxlength="300" rows="3" placeholder="Describe it in your own words, or add a photo and let Incident AI describe it"></textarea></label>
+        <label class="drop"><input type="file" id="photo" accept="image/jpeg,image/png,image/gif,image/webp"><i data-lucide="image-plus"></i> Add a photo (JPEG, PNG, GIF or WebP, up to 5 MB)</label>
+        <p id="photoMsg" class="small" aria-live="polite"></p>
+        <div id="photoBox" class="photo-box" hidden>
+          <img id="preview" class="preview" alt="Preview of the selected photo">
+          <div class="ai-row">
+            <button type="button" id="aiDescribe"><i data-lucide="wand-2"></i>Describe again with Incident AI</button>
+            <button type="button" class="ai-cancel" id="aiCancel" hidden><i data-lucide="x"></i>Cancel</button>
+            <button type="button" id="removePhoto"><i data-lucide="trash-2"></i>Remove photo</button>
+            <span id="aiNote" class="small" aria-live="polite"></span>
+          </div>
+          <label>AI photo description (you can edit it) <textarea id="aiText" maxlength="600" rows="3"></textarea></label>
+        </div>
+        <label class="check"><input type="checkbox" id="urgent"> This is urgent (someone may be hurt or in danger)</label>
+        <button type="submit" class="primary" id="submitBtn"><i data-lucide="send"></i>Submit report</button>
+      </form>
+      <div id="done" class="done" hidden role="status"></div>
+    </section>
+  </main>
+</div>
+<script src="core.js"></script>
+<script src="ai.js"></script>
+<script>
+let imgBlob = null, imgThumb = '', submitting = false;
+const DRAFT_KEY = 'incident-desk-draft';
+
+$('category').innerHTML = CATEGORIES.map(c => '<option>' + c + '</option>').join('');
+const pm = t => { $('photoMsg').textContent = t; };
+function pageRender() { showAlert(); refreshIcons(); }
+function busy(on) { $('aiDescribe').disabled = on; $('photo').disabled = on; $('aiCancel').hidden = !on; }
+
+(function restoreDraft() {
+  try {
+    const d = JSON.parse(localStorage.getItem(DRAFT_KEY));
+    if (!d) return;
+    if (d.reporter) $('reporter').value = d.reporter;
+    if (d.category) $('category').value = d.category;
+    if (d.location) $('location').value = d.location;
+    if (d.assignee) $('assignee').value = d.assignee;
+    if (d.description) $('description').value = d.description;
+    if (d.urgent) $('urgent').checked = true;
+    if (d.savedAt) {
+      const banner = document.createElement('div');
+      banner.className = 'draft-banner';
+      banner.innerHTML = '<i data-lucide="file-edit"></i> Draft restored from ' + relativeTime(d.savedAt) + '. <button type="button" id="discardDraft">Discard</button>';
+      $('form').parentNode.insertBefore(banner, $('form'));
+      refreshIcons();
+      document.getElementById('discardDraft').addEventListener('click', () => {
+        localStorage.removeItem(DRAFT_KEY);
+        $('form').reset();
+        $('category').value = CATEGORIES[0];
+        banner.remove();
+      });
+    }
+  } catch (e) {}
+})();
+
+const saveDraft = debounce(() => {
+  const d = {
+    reporter: $('reporter').value.trim(), category: $('category').value,
+    location: $('location').value.trim(), assignee: $('assignee').value.trim(),
+    description: $('description').value.trim(), urgent: $('urgent').checked, savedAt: Date.now()
+  };
+  if (!d.reporter && !d.location && !d.description) {
+    try { localStorage.removeItem(DRAFT_KEY); } catch (e) {}
+    return;
+  }
+  try { localStorage.setItem(DRAFT_KEY, JSON.stringify(d)); } catch (e) {}
+}, 800);
+$('form').addEventListener('input', saveDraft);
+
+function findPossibleDuplicate(data) {
+  const now = Date.now(), sixHours = 6 * 60 * 60 * 1000;
+  const loc = (data.location || '').toLowerCase().trim();
+  if (!loc) return null;
+  return records.search(r =>
+    r.status !== 'Resolved' && now - r.created < sixHours && r.category === data.category &&
+    (r.location || '').toLowerCase().trim() === loc
+  )[0] || null;
+}
+
+async function describe() {
+  if (!imgBlob) return;
+  if (aiController) { $('aiNote').textContent = 'Another request is already running.'; return; }
+  busy(true);
+  $('aiNote').textContent = 'Incident AI is looking at the photo... this can take up to 30 seconds.';
+  const prompt = 'You help a school incident desk. Look at the photo and reply with ONLY a valid JSON object, no markdown, no code fences, in exactly this shape: ' +
+    '{"description":"<2 to 3 plain sentences describing what is visible that matters for an incident report>","category":"<one of: ' + CATEGORIES.join(', ') +
+    '>","urgent":true or false,"reason":"<one short sentence>"}. Set urgent to true only if the photo shows someone hurt, fire, smoke or other danger. Do not name or identify people.' +
+    ($('location').value.trim() ? ' Location: ' + $('location').value.trim().slice(0, 80) + '.' : '') +
+    ($('description').value.trim() ? ' Reporter note: ' + $('description').value.trim().slice(0, 300) : '');
+  try {
+    const reply = await askAI(prompt, imgBlob), d = extractJson(reply);
+    if (d && typeof d.description === 'string' && d.description.trim()) {
+      $('aiText').value = d.description.trim().slice(0, 600);
+      if (CATEGORIES.includes(d.category)) $('category').value = d.category;
+      if (d.urgent === true) $('urgent').checked = true;
+      $('aiNote').textContent = 'Done.' + (typeof d.reason === 'string' && d.reason ? ' ' + d.reason : '') + ' Please check before submitting.';
+    } else if (reply.trim()) {
+      $('aiText').value = reply.trim().slice(0, 600);
+      $('aiNote').textContent = 'Done. Please check before submitting.';
+    } else $('aiNote').textContent = 'Incident AI gave an empty answer. Type the description yourself.';
+  } catch (err) {
+    $('aiNote').textContent = err.message + ' You can still submit without the AI description.';
+  }
+  busy(false);
+}
+
+(function setupVoice() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) return;
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'voice-btn';
+  btn.innerHTML = '<i data-lucide="mic"></i> Speak description';
+  btn.style.marginTop = '6px';
+  $('description').parentNode.insertBefore(btn, $('description').nextSibling);
+  let recog = null, active = false;
+  btn.addEventListener('click', () => {
+    if (active && recog) { recog.stop(); return; }
+    recog = new SR();
+    recog.lang = 'en-US'; recog.interimResults = false; recog.continuous = false;
+    recog.onstart = () => { active = true; btn.classList.add('recording'); btn.innerHTML = '<i data-lucide="mic-off"></i> Stop'; refreshIcons(); };
+    recog.onend = () => { active = false; btn.classList.remove('recording'); btn.innerHTML = '<i data-lucide="mic"></i> Speak description'; refreshIcons(); };
+    recog.onresult = e => {
+      const ta = $('description');
+      ta.value = (ta.value ? ta.value + ' ' : '') + e.results[0][0].transcript;
+      saveDraft();
+    };
+    recog.onerror = e => { pm('Voice error: ' + e.error); };
+    recog.start();
+  });
+  refreshIcons();
+})();
+
+$('photo').addEventListener('change', async e => {
+  const f = e.target.files[0]; if (!f) return;
+  pm('');
+  if (!IMAGE_TYPES.includes(f.type)) { pm('Use a JPEG, PNG, GIF or WebP photo.'); e.target.value = ''; return; }
+  if (f.size > 5 * 1024 * 1024) { pm('That photo is over 5 MB. Choose a smaller one.'); e.target.value = ''; return; }
+  try { imgBlob = await shrink(f, 1280, 0.85); imgThumb = await blobToDataURL(await shrink(f, 600, 0.7)); }
+  catch (err) { pm(err.message); e.target.value = ''; return; }
+  $('preview').src = imgThumb; $('photoBox').hidden = false; $('aiText').value = '';
+  if (aiPhotoConsent()) describe();
+  else $('aiNote').textContent = 'Photo added. Incident AI was skipped.';
+});
+$('aiDescribe').addEventListener('click', describe);
+$('removePhoto').addEventListener('click', () => {
+  imgBlob = null; imgThumb = ''; $('photo').value = ''; $('photoBox').hidden = true; $('aiText').value = ''; $('aiNote').textContent = '';
+});
+
+$('form').addEventListener('submit', e => {
+  e.preventDefault();
+  if (submitting) return;
+  const ai = $('aiText').value.trim(), text = $('description').value.trim() || ai;
+  if (!text) { pm('Describe what happened, or add a photo.'); return; }
+  const data = {
+    reporter: $('reporter').value.trim(), category: $('category').value, location: $('location').value.trim()
+  };
+  const dup = findPossibleDuplicate(data);
+  if (dup) {
+    if (!confirm('A similar ' + dup.category + ' at "' + dup.location + '" was reported ' +
+      relativeTime(dup.created) + ' (' + dup.id + ').\n\nSubmit anyway?')) return;
+  }
+  submitting = true;
+  const btn = $('submitBtn'); btn.disabled = true;
+  const r = addReport({
+    reporter: data.reporter, category: data.category, location: data.location,
+    assignee: $('assignee').value.trim(), description: text,
+    urgent: $('urgent').checked, image: imgThumb, aiDescription: ai
+  });
+  try { localStorage.removeItem(DRAFT_KEY); } catch (er) {}
+  const banner = document.querySelector('.draft-banner'); if (banner) banner.remove();
+  e.target.reset(); $('removePhoto').click(); pm('');
+  const d = $('done'); d.hidden = false;
+  d.textContent = 'Report ' + r.id + ' recorded' + (r.urgent ? ' and flagged urgent' : '') + (r.imageDropped ? ' (the photo was too large to keep in this browser)' : '') + '. ';
+  const a = document.createElement('a'); a.href = 'records.html'; a.textContent = 'View incident records';
+  d.appendChild(a);
+  toast('Report ' + r.id + ' saved.');
+  submitting = false; btn.disabled = false;
+});
+render();
+</script>
+</body>
+</html>

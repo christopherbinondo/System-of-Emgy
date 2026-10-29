@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Analytics | Incident Desk</title>
+<script>
+  try {
+    var t = localStorage.getItem('incident-desk-theme');
+    if (t === 'dark' || (!t && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+      document.documentElement.setAttribute('data-theme', 'dark');
+    }
+  } catch (e) {}
+</script>
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
+<link rel="manifest" href="manifest.json">
+<link rel="stylesheet" href="style.css?v=5">
+</head>
+<body>
+<div class="content">
+  <header class="bar">
+    <div>
+      <h1><i data-lucide="bar-chart-3"></i>Analytics</h1>
+      <p>Trends, hotspots and response times across all reports.</p>
+    </div>
+    <a class="btn" href="records.html"><i data-lucide="archive"></i>Open records</a>
+  </header>
+  <div id="alert" class="alert" hidden role="alert"></div>
+  <main>
+    <section class="panel wide reveal">
+      <h2><i data-lucide="trending-up"></i>Reports per day (last 14 days)</h2>
+      <p class="hint">Bar height = total reports that day. Darker overlay = still open.</p>
+      <div id="trendChart" class="chart-bars" role="img" aria-label="Reports per day"></div>
+    </section>
+
+    <section class="panel reveal">
+      <h2><i data-lucide="pie-chart"></i>By category</h2>
+      <div id="catChart" class="chart-hbars"></div>
+    </section>
+
+    <section class="panel reveal">
+      <h2><i data-lucide="map-pin"></i>Top locations</h2>
+      <div id="locChart" class="chart-hbars"></div>
+    </section>
+
+    <section class="panel reveal">
+      <h2><i data-lucide="timer"></i>Response time</h2>
+      <p class="hint">Time from report to first status change.</p>
+      <dl class="metric-grid">
+        <div><dt>Avg response</dt><dd id="mAvg">—</dd></div>
+        <div><dt>Fastest</dt><dd id="mFast">—</dd></div>
+        <div><dt>Slowest</dt><dd id="mSlow">—</dd></div>
+        <div><dt>Median</dt><dd id="mMed">—</dd></div>
+      </dl>
+    </section>
+
+    <section class="panel reveal">
+      <h2><i data-lucide="users"></i>By staff</h2>
+      <div id="staffChart" class="chart-hbars"></div>
+    </section>
+
+    <section class="panel reveal">
+      <h2><i data-lucide="zap"></i>Urgent vs regular</h2>
+      <div class="split-metric">
+        <div><span id="urgentPct" class="split-num">0%</span><span class="small">urgent</span></div>
+        <div class="split-bar"><div id="urgentBar" class="split-fill-urgent" style="width:0%"></div><div id="normalBar" class="split-fill-normal" style="width:100%"></div></div>
+      </div>
+      <p class="small" id="urgentDetail"></p>
+    </section>
+  </main>
+  <footer class="app-footer">All figures are calculated live from the data stored in this browser.</footer>
+</div>
+<script src="core.js"></script>
+<script>
+function pageRender() {
+  showAlert();
+  const all = records.toArray();
+  const open = all.filter(r => r.status !== 'Resolved');
+  const now = Date.now(), dayMs = 86400000;
+
+  const days = [];
+  for (let i = 13; i >= 0; i--) {
+    const d = new Date(now - i * dayMs);
+    days.push({ key: d.toISOString().slice(0, 10), label: d.toLocaleDateString([], { month: 'short', day: 'numeric' }), total: 0, open: 0 });
+  }
+  const dayMap = {};
+  days.forEach(d => dayMap[d.key] = d);
+  all.forEach(r => {
+    const key = new Date(r.created).toISOString().slice(0, 10);
+    if (dayMap[key]) { dayMap[key].total++; if (r.status !== 'Resolved') dayMap[key].open++; }
+  });
+  const maxTrend = Math.max(1, ...days.map(d => d.total));
+  $('trendChart').innerHTML = days.map(d => {
+    const hTotal = Math.round((d.total / maxTrend) * 100);
+    const hOpen = Math.round((d.open / maxTrend) * 100);
+    return '<div class="chart-bar-wrap" title="' + d.label + ': ' + d.total + ' total, ' + d.open + ' open">' +
+      '<div class="chart-bar" style="height:' + Math.max(3, hTotal) + '%">' +
+        '<div class="chart-bar-fill" style="height:' + (d.total ? (hOpen / Math.max(1, hTotal)) * 100 : 0) + '%"></div>' +
+      '</div><span class="chart-bar-label">' + d.label + '</span></div>';
+  }).join('');
+
+  function hbars(target, data) {
+    const max = Math.max(1, ...data.map(x => x.n));
+    if (!data.length) { $(target).innerHTML = '<p class="small">No data yet.</p>'; return; }
+    $(target).innerHTML = data.map(x =>
+      '<div class="hbar"><span class="hbar-label" title="' + esc(x.k) + '">' + esc(x.k) + '</span>' +
+      '<div class="hbar-track"><div class="hbar-fill" style="width:' + (x.n / max * 100) + '%"></div></div>' +
+      '<span class="hbar-val">' + x.n + '</span></div>'
+    ).join('');
+  }
+
+  const catCount = {};
+  all.forEach(r => catCount[r.category] = (catCount[r.category] || 0) + 1);
+  hbars('catChart', insertionSort(Object.entries(catCount).map(([k, n]) => ({ k, n })), (a, b) => b.n - a.n));
+
+  const locCount = {};
+  all.forEach(r => { const k = (r.location || '').trim() || '(unspecified)'; locCount[k] = (locCount[k] || 0) + 1; });
+  hbars('locChart', insertionSort(Object.entries(locCount).map(([k, n]) => ({ k, n })), (a, b) => b.n - a.n).slice(0, 8));
+
+  const staffCount = {};
+  all.forEach(r => { const k = cleanName(r.assignee) || '(unassigned)'; staffCount[k] = (staffCount[k] || 0) + 1; });
+  hbars('staffChart', insertionSort(Object.entries(staffCount).map(([k, n]) => ({ k, n })), (a, b) => b.n - a.n));
+
+  const responses = [];
+  all.forEach(r => {
+    if (!r.timeline || !r.timeline.length) return;
+    for (let i = 0; i < r.timeline.length; i++) {
+      if (r.timeline[i].from === 'Pending' || r.timeline[i].from === null) continue;
+      responses.push(r.timeline[i].time - r.created);
+      break;
+    }
+  });
+  const fmtDur = ms => {
+    if (!ms || ms < 0) return '—';
+    const m = Math.round(ms / 60000);
+    if (m < 60) return m + ' min';
+    const h = Math.floor(m / 60), mm = m % 60;
+    if (h < 24) return h + 'h ' + mm + 'm';
+    const d = Math.floor(h / 24), hh = h % 24;
+    return d + 'd ' + hh + 'h';
+  };
+  if (responses.length) {
+    const sorted = insertionSort(responses, (a, b) => a - b);
+    const avg = responses.reduce((a, b) => a + b, 0) / responses.length;
+    $('mAvg').textContent = fmtDur(avg);
+    $('mFast').textContent = fmtDur(sorted[0]);
+    $('mSlow').textContent = fmtDur(sorted[sorted.length - 1]);
+    $('mMed').textContent = fmtDur(sorted[Math.floor(sorted.length / 2)]);
+  }
+
+  const urgent = all.filter(r => r.urgent).length;
+  const pct = all.length ? Math.round(urgent / all.length * 100) : 0;
+  $('urgentPct').textContent = pct + '%';
+  $('urgentBar').style.width = pct + '%';
+  $('normalBar').style.width = (100 - pct) + '%';
+  $('urgentDetail').textContent = urgent + ' urgent out of ' + all.length + ' total. ' + open.filter(r => r.urgent).length + ' still open urgent.';
+
+  refreshIcons();
+}
+render();
+</script>
+</body>
+</html>

@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Processing queue | Incident Desk</title>
+<script>
+  try {
+    var t = localStorage.getItem('incident-desk-theme');
+    if (t === 'dark' || (!t && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+      document.documentElement.setAttribute('data-theme', 'dark');
+    }
+  } catch (e) {}
+</script>
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
+<link rel="manifest" href="manifest.json">
+<link rel="stylesheet" href="style.css?v=5">
+</head>
+<body>
+<div class="content">
+  <header class="bar">
+    <div>
+      <h1><i data-lucide="list-ordered"></i>Processing queue</h1>
+      <p>Urgent reports are taken first; within each line, oldest first. Press <kbd>N</kbd> for next, <kbd>U</kbd> to undo.</p>
+    </div>
+  </header>
+  <div id="alert" class="alert" hidden role="alert"></div>
+  <main>
+    <section class="panel reveal" aria-labelledby="h-queue">
+      <h2 id="h-queue"><i data-lucide="layers"></i>Waiting reports</h2>
+      <div class="queues">
+        <div><h3><span><i data-lucide="alert-triangle"></i>Urgent</span> <span id="uCount">0</span></h3><ol id="uList"></ol></div>
+        <div><h3><span><i data-lucide="list"></i>Regular</span> <span id="nCount">0</span></h3><ol id="nList"></ol></div>
+      </div>
+      <button id="next" class="primary"><i data-lucide="play-circle"></i>Process next report</button>
+      <p id="msg" class="hint" aria-live="polite"></p>
+    </section>
+    <section class="panel reveal" aria-labelledby="h-hist">
+      <h2 id="h-hist"><i data-lucide="rotate-ccw"></i>Recent changes</h2>
+      <p class="hint">Newest first. Undo takes back the latest change.</p>
+      <ul id="history" class="history"></ul>
+      <button id="undo"><i data-lucide="undo-2"></i>Undo last change</button>
+    </section>
+  </main>
+</div>
+<script src="core.js"></script>
+<script>
+const li = r => '<li class="queue-item" data-id="' + r.id + '">' +
+  '<div class="queue-item-main"><span class="id">' + r.id + '</span> ' + esc(r.category) +
+    ' <span class="small">' + esc(r.location) + '</span>' +
+    (r.assignee ? ' <span class="small">→ ' + esc(r.assignee) + '</span>' : '') + '</div>' +
+  '<div class="queue-item-actions">' +
+    '<button type="button" class="mini" data-skip="' + r.id + '" title="Skip to In Progress">Skip</button>' +
+    '<button type="button" class="mini" data-reassign="' + r.id + '" title="Assign to staff">Assign</button>' +
+  '</div></li>';
+
+function pageRender() {
+  const u = urgentQ.toArray(), n = regularQ.toArray();
+  $('uCount').textContent = u.length; $('nCount').textContent = n.length;
+  $('uList').innerHTML = u.map(li).join(''); $('nList').innerHTML = n.map(li).join('');
+  $('history').innerHTML = history.toArray().slice(0, 10).map(h =>
+    '<li>' + h.id + ': ' + (h.from || 'new') + ' → ' + h.to +
+      (h.actor ? ' <span class="small">(' + h.actor + ')</span>' : '') +
+      ' <span class="small">· ' + relativeTime(h.time) + '</span></li>'
+  ).join('') || '<li>No changes yet.</li>';
+  showAlert();
+  refreshIcons();
+}
+
+$('next').addEventListener('click', () => {
+  const r = processNext();
+  $('msg').textContent = r ? r.id + ' is now In Progress' + (r.urgent ? ' (urgent).' : '.') : 'The queue is empty.';
+  if (r) toast(r.id + ' → In Progress', { actionLabel: 'Undo', onAction: () => { undoLast(); $('msg').textContent = 'Undid ' + r.id + '.'; } });
+});
+
+$('undo').addEventListener('click', () => {
+  const h = undoLast();
+  $('msg').textContent = h ? 'Undid ' + h.id + ': back to ' + h.from + '.' : 'Nothing to undo.';
+});
+
+document.addEventListener('keydown', e => {
+  if (e.target.matches('input, textarea, select, [contenteditable]')) return;
+  if (e.key === 'n' || e.key === 'N') { e.preventDefault(); $('next').click(); }
+  if (e.key === 'u' || e.key === 'U') { e.preventDefault(); $('undo').click(); }
+});
+
+document.addEventListener('click', e => {
+  const skipId = e.target.closest('[data-skip]')?.dataset.skip;
+  if (skipId) {
+    const r = records.findById(skipId);
+    if (!r) return;
+    urgentQ.remove(skipId); regularQ.remove(skipId);
+    setStatus(r, 'In Progress', true, { actor: 'skipped' });
+    toast(skipId + ' skipped to In Progress.', { actionLabel: 'Undo', onAction: () => undoLast() });
+    return;
+  }
+  const rid = e.target.closest('[data-reassign]')?.dataset.reassign;
+  if (rid) {
+    const r = records.findById(rid);
+    if (!r) return;
+    const name = prompt('Assign ' + rid + ' to which staff member?', r.assignee || '');
+    if (name === null) return;
+    r.assignee = cleanName(name);
+    save(); render();
+    toast(rid + ' assigned to ' + (r.assignee || '(nobody)') + '.');
+  }
+});
+
+render();
+</script>
+</body>
+</html>

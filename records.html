@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Incident records | Incident Desk</title>
+<script>
+  try {
+    var t = localStorage.getItem('incident-desk-theme');
+    if (t === 'dark' || (!t && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+      document.documentElement.setAttribute('data-theme', 'dark');
+    }
+  } catch (e) {}
+</script>
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
+<link rel="manifest" href="manifest.json">
+<link rel="stylesheet" href="style.css?v=5">
+</head>
+<body>
+<div class="content">
+  <header class="bar">
+    <div>
+      <h1><i data-lucide="archive"></i>Incident records</h1>
+      <p>Search, sort and update every report. Press <kbd>Ctrl</kbd>+<kbd>K</kbd> to search, <kbd>Esc</kbd> to clear selection.</p>
+    </div>
+    <a class="btn" href="report.html"><i data-lucide="plus-circle"></i>Report an incident</a>
+  </header>
+  <div id="alert" class="alert" hidden role="alert"></div>
+  <div id="storageWarn"></div>
+  <main>
+    <section class="panel wide reveal" aria-labelledby="h-list">
+      <h2 id="h-list"><i data-lucide="table-2"></i>All reports</h2>
+      <div class="tools">
+        <div class="tabs" role="tablist">
+          <button data-view="all" class="on">All</button>
+          <button data-view="pending">Pending</button>
+          <button data-view="resolved">Resolved</button>
+        </div>
+        <label>Sort by
+          <select id="sort">
+            <option value="new">Date, newest first</option>
+            <option value="old">Date, oldest first</option>
+            <option value="status">Status</option>
+            <option value="urgent">Urgency</option>
+          </select>
+        </label>
+        <label>Assignee
+          <select id="filterAssignee"><option value="">Anyone</option><option value="__none">Unassigned</option></select>
+        </label>
+        <form id="searchForm" class="search">
+          <select id="searchBy">
+            <option value="all">All fields</option>
+            <option value="id">Incident ID</option>
+            <option value="cat">Category</option>
+            <option value="loc">Location</option>
+            <option value="rep">Reporter</option>
+          </select>
+          <input id="searchText" placeholder="Search records" aria-label="Search text">
+          <button aria-label="Search records"><i data-lucide="search"></i>Search</button>
+          <button type="button" id="clear" aria-label="Clear search"><i data-lucide="x"></i>Clear</button>
+        </form>
+        <button type="button" id="bulkBtn" hidden><i data-lucide="check-square"></i>Bulk (<span id="bulkCount">0</span>)</button>
+        <button type="button" id="backupBtn"><i data-lucide="hard-drive"></i>Backup</button>
+        <span id="storageMeter" class="storage-meter"></span>
+        <button type="button" id="clearResolved"><i data-lucide="check-check"></i>Clear resolved</button>
+        <button type="button" id="clearAll" class="danger"><i data-lucide="trash-2"></i>Clear all</button>
+        <button type="button" id="exportBtn"><i data-lucide="download"></i>Export</button>
+        
+        <label class="import-label">
+          <i data-lucide="upload"></i>Import
+          <input type="file" id="importInput" accept="application/json" style="display:none;">
+        </label>
+      </div>
+      <p id="count" class="hint"></p>
+      
+      <div class="scroll" id="tableScroll">
+        <table>
+          <thead>
+            <tr>
+              <th class="col-check"><input type="checkbox" id="checkAll" aria-label="Select all"></th>
+              <th>ID</th>
+              <th>Photo</th>
+              <th>Category</th>
+              <th>Details</th>
+              <th>Reported</th>
+              <th>Status</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+</div>
+<script src="core.js"></script>
+<script>
+let selected = new Set();
+let lastQuery = '';
+
+function populateAssigneeFilter() {
+  const sel = $('filterAssignee'); if (!sel) return;
+  const current = sel.value;
+  const seen = {}, names = [];
+  
+  records.toArray().forEach(r => {
+    const cleaned = cleanName(r.assignee);
+    if (cleaned && !seen[cleaned]) { seen[cleaned] = 1; names.push(cleaned); }
+  });
+  
+  names.sort();
+  sel.innerHTML = '<option value="">Anyone</option><option value="__none">Unassigned</option>' +
+    names.map(n => '<option value="' + esc(n) + '">' + esc(n) + '</option>').join('');
+  sel.value = current;
+}
+
+function updateStorageMeter() {
+  const el = $('storageMeter'); if (!el) return;
+  const s = storageStats();
+  el.innerHTML = '<span class="meter-track"><span class="meter-fill" style="width:' + s.pct + '%"></span></span>' +
+    '<span class="small">' + s.pct + '% storage</span>';
+  el.title = Math.round(s.bytes / 1024) + ' KB used of ~' + Math.round(s.quota / 1024) + ' KB';
+}
+
+function updateBulkBar() {
+  const n = selected.size, btn = $('bulkBtn');
+  if (!btn) return;
+  btn.hidden = n === 0;
+  const c = $('bulkCount'); if (c) c.textContent = n;
+}
+
+function pageRender() {
+  showAlert();
+  populateAssigneeFilter();
+  updateStorageMeter();
+  const sw = document.getElementById('storageWarn');
+  if (sw) sw.innerHTML = storageWarning();
+
+  let list = found || records.toArray();
+  const af = $('filterAssignee').value;
+  
+  if (af === '__none') list = list.filter(r => !r.assignee);
+  else if (af) list = list.filter(r => cleanName(r.assignee) === af);
+  
+  if (view === 'pending') list = list.filter(r => r.status !== 'Resolved');
+  if (view === 'resolved') list = list.filter(r => r.status === 'Resolved');
+
+  const s = $('sort').value;
+  list = insertionSort(list, s === 'status' ? (a, b) => RANK[a.status] - RANK[b.status] || a.created - b.created
+    : s === 'urgent' ? (a, b) => (b.urgent ? 1 : 0) - (a.urgent ? 1 : 0) || a.created - b.created
+    : s === 'old' ? (a, b) => a.created - b.created : (a, b) => b.created - a.created);
+
+  $('count').textContent = list.length + ' record' + (list.length === 1 ? '' : 's') + (found ? ' matching your search' : '');
+
+  $('rows').innerHTML = list.length ? list.map(r => {
+    const imgCell = r.image
+      ? '<button type="button" class="thumb-btn" data-img="' + esc(r.image) + '" data-alt="Photo for ' + r.id + '" aria-label="Enlarge photo for ' + r.id + '"><img class="thumb" src="' + esc(r.image) + '" alt="Photo for ' + r.id + '"></button>'
+      : '<span class="small">None</span>';
+
+    const detailsCell =
+      '<div class="details-cell">' +
+        '<div class="details-desc">' + highlight(r.description || '', lastQuery) + '</div>' +
+        (r.aiDescription ? '<div class="aiTag" title="' + esc(r.aiDescription) + '"><i data-lucide="sparkles"></i>AI: ' + esc(r.aiDescription) + '</div>' : '') +
+        '<div class="small details-meta">' + highlight(r.location || '', lastQuery) + ' | by ' + highlight(r.reporter || '', lastQuery) + (r.assignee ? ' | → ' + esc(r.assignee) : '') + '</div>' +
+        (r.timeline && r.timeline.length ? '<details class="timeline"><summary class="small">Timeline (' + r.timeline.length + ')</summary><ul class="small">' + r.timeline.map(t => '<li>' + fmt(t.time) + ': ' + (t.from || 'new') + ' → ' + t.to + ' <span class="small">(' + esc(t.actor || '') + ')</span></li>').join('') + '</ul></details>' : '') +
+      '</div>';
+
+    return '<tr class="' + (r.urgent && r.status !== 'Resolved' ? 'urgent' : '') + '">' +
+      '<td class="col-check"><input type="checkbox" class="row-check" data-id="' + r.id + '"' + (selected.has(r.id) ? ' checked' : '') + ' aria-label="Select ' + r.id + '"></td>' +
+      '<td class="id" title="' + r.id + '">' + highlight(r.id, lastQuery) + '</td>' +
+      '<td>' + imgCell + '</td>' +
+      '<td title="' + esc(r.category) + '">' + highlight(r.category, lastQuery) + tagU(r) + '</td>' +
+      '<td>' + detailsCell + '</td>' +
+      '<td class="small" title="' + fmt(r.created) + '">' + relativeTime(r.created) + '</td>' +
+      '<td><select class="st-' + r.status.replace(' ', '') + '" data-id="' + r.id + '" aria-label="Status of ' + r.id + '">' +
+        STATUSES.map(st => '<option' + (st === r.status ? ' selected' : '') + '>' + st + '</option>').join('') +
+      '</select></td>' +
+      '<td><button type="button" class="danger" data-del="' + r.id + '" aria-label="Delete ' + r.id + '" title="Delete ' + r.id + '"><i data-lucide="trash-2"></i></button></td>' +
+    '</tr>';
+  }).join('')
+  : '<tr><td colspan="8" class="empty"><i data-lucide="inbox"></i><p>No incidents match your filters.</p><a class="btn" href="report.html">Report an incident</a></td></tr>';
+
+  const ca = $('checkAll');
+  if (ca) {
+    ca.checked = list.length > 0 && list.every(r => selected.has(r.id));
+    ca.indeterminate = !ca.checked && list.some(r => selected.has(r.id));
+  }
+  updateBulkBar();
+  refreshIcons();
+}
+
+$('rows').addEventListener('change', e => {
+  if (e.target.classList.contains('row-check')) {
+    const id = e.target.dataset.id;
+    if (e.target.checked) selected.add(id); else selected.delete(id);
+    updateBulkBar();
+    const ca = $('checkAll'), rowChecks = document.querySelectorAll('.row-check');
+    ca.checked = rowChecks.length > 0 && Array.from(rowChecks).every(c => c.checked);
+    ca.indeterminate = !ca.checked && Array.from(rowChecks).some(c => c.checked);
+    return;
+  }
+  if (!e.target.dataset.id) return;
+  const id = e.target.dataset.id;
+  const r = records.findById(id);
+  if (!r) return;
+  const to = e.target.value;
+  if (r.status === 'Pending' && to === 'Resolved') {
+    if (!confirm('Mark ' + id + ' as Resolved without processing it?')) { e.target.value = r.status; return; }
+  }
+  const from = r.status;
+  setStatus(r, to, true, { actor: 'staff' });
+  toast(id + ': ' + from + ' → ' + to, { actionLabel: 'Undo', onAction: () => undoLast() });
+});
+
+document.addEventListener('change', e => {
+  if (e.target.id !== 'checkAll') return;
+  if (e.target.checked) {
+    document.querySelectorAll('.row-check').forEach(c => { c.checked = true; selected.add(c.dataset.id); });
+  } else {
+    document.querySelectorAll('.row-check').forEach(c => { c.checked = false; selected.delete(c.dataset.id); });
+  }
+  updateBulkBar();
+});
+
+$('bulkBtn').addEventListener('click', () => {
+  const ids = Array.from(selected);
+  if (!ids.length) return;
+  const choice = prompt('Bulk action on ' + ids.length + ' report(s):\n\n1 = Mark In Progress\n2 = Mark Resolved\n3 = Delete\n\nEnter a number:', '1');
+  if (!choice) return;
+  if (choice === '1') { bulkSetStatus(ids, 'In Progress'); selected.clear(); }
+  else if (choice === '2') { if (confirm('Mark ' + ids.length + ' report(s) as Resolved?')) { bulkSetStatus(ids, 'Resolved'); selected.clear(); } }
+  else if (choice === '3') { if (confirm('Permanently delete ' + ids.length + ' report(s)?')) { bulkDelete(ids); selected.clear(); } }
+  render();
+});
+
+$('backupBtn').addEventListener('click', () => { exportJSON(); toast('Backup downloaded.'); });
+
+$('rows').addEventListener('click', e => {
+  const btn = e.target.closest('.thumb-btn');
+  if (btn) { openLightbox(btn.dataset.img, btn.dataset.alt); return; }
+  const del = e.target.closest('button[data-del]');
+  if (!del) return;
+  const id = del.dataset.del;
+  const r = records.findById(id);
+  if (!r) return;
+  const warn = r.status !== 'Resolved' ? '\n\nThis report is still ' + r.status + (r.urgent ? ' and URGENT' : '') + '.' : '';
+  if (confirm('Permanently delete ' + id + '?' + warn)) {
+    if (found) found = found.filter(x => x.id !== id);
+    selected.delete(id);
+    deleteReport(id);
+    toast(id + ' deleted.');
+  }
+});
+
+document.querySelector('.tabs').addEventListener('click', e => {
+  if (!e.target.dataset.view) return;
+  view = e.target.dataset.view;
+  document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('on', b === e.target));
+  $('tableScroll').scrollTop = 0;
+  render();
+});
+$('sort').addEventListener('change', () => { $('tableScroll').scrollTop = 0; render(); });
+$('filterAssignee').addEventListener('change', render);
+
+const liveSearch = debounce(() => { $('searchForm').dispatchEvent(new Event('submit')); }, 300);
+$('searchText').addEventListener('input', liveSearch);
+
+$('searchForm').addEventListener('submit', e => {
+  e.preventDefault();
+  const q = $('searchText').value.trim().toLowerCase();
+  lastQuery = q;
+  if (!q) { found = null; render(); return; }
+  const by = $('searchBy').value;
+  found = records.search(r => {
+    if (by === 'id') return r.id.toLowerCase().includes(q);
+    if (by === 'cat') return r.category.toLowerCase().includes(q);
+    if (by === 'loc') return (r.location || '').toLowerCase().includes(q);
+    if (by === 'rep') return (r.reporter || '').toLowerCase().includes(q);
+    return (r.id + ' ' + r.category + ' ' + (r.location || '') + ' ' + (r.reporter || '') + ' ' + (r.assignee || '') + ' ' + (r.description || '') + ' ' + (r.aiDescription || '')).toLowerCase().includes(q);
+  });
+  $('tableScroll').scrollTop = 0;
+  render();
+});
+$('clear').addEventListener('click', () => { found = null; lastQuery = ''; $('searchText').value = ''; render(); });
+
+$('clearResolved').addEventListener('click', () => {
+  const n = records.search(r => r.status === 'Resolved').length;
+  if (!n) { alert('There are no resolved incidents to clear.'); return; }
+  if (confirm('Permanently delete ' + n + ' resolved incident' + (n > 1 ? 's' : '') + '?')) {
+    found = null; selected.clear(); clearResolved(); toast('Cleared ' + n + ' resolved report(s).');
+  }
+});
+
+$('clearAll').addEventListener('click', () => {
+  const all = records.toArray();
+  if (!all.length) { alert('There are no incidents to clear.'); return; }
+  const open = all.filter(r => r.status !== 'Resolved');
+  const urgent = open.filter(r => r.urgent).length;
+  const warn = open.length ? '\n\nWARNING: ' + open.length + ' are still unresolved' + (urgent ? ' (' + urgent + ' urgent)' : '') + '.' : '';
+  if (confirm('Delete ALL ' + all.length + ' incidents? This cannot be undone.' + warn)) {
+    found = null; selected.clear(); clearAll(); toast('All incidents cleared.');
+  }
+});
+
+$('exportBtn').addEventListener('click', () => {
+  const choice = prompt('Export as: type "json" or "csv"', 'json');
+  if (!choice) return;
+  if (choice.toLowerCase() === 'csv') exportCSV(); else exportJSON();
+});
+
+$('importInput').addEventListener('change', e => {
+  const f = e.target.files[0];
+  if (f) importJSON(f);
+  e.target.value = '';
+});
+
+document.addEventListener('keydown', e => {
+  if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) {
+    e.preventDefault();
+    $('searchText').focus(); $('searchText').select();
+  }
+  if (e.key === 'Escape' && selected.size) {
+    selected.clear();
+    document.querySelectorAll('.row-check').forEach(c => c.checked = false);
+    const ca = $('checkAll'); if (ca) { ca.checked = false; ca.indeterminate = false; }
+    updateBulkBar();
+  }
+});
+
+render();
+</script>
+</body>
+</html>

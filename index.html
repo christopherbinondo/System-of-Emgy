@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dashboard | Incident Desk</title>
+<script>
+  try {
+    var t = localStorage.getItem('incident-desk-theme');
+    if (t === 'dark' || (!t && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+      document.documentElement.setAttribute('data-theme', 'dark');
+    }
+  } catch (e) {}
+</script>
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
+<link rel="manifest" href="manifest.json">
+<link rel="stylesheet" href="style.css?v=5">
+</head>
+<body>
+<div class="content">
+  <header class="bar">
+    <div>
+      <h1><i data-lucide="layout-dashboard"></i>Dashboard</h1>
+      <p id="today"></p>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button type="button" id="whoAmI" class="btn" style="background:transparent;color:inherit;border-color:var(--line-strong)">
+        <i data-lucide="user"></i><span id="whoLabel">Set my name</span>
+      </button>
+      <a class="btn" href="report.html"><i data-lucide="plus-circle"></i>Report an incident</a>
+    </div>
+  </header>
+  <div id="alert" class="alert" hidden role="alert"></div>
+  <div id="storageWarn"></div>
+  <dl class="stats">
+    <div><dt><i data-lucide="files"></i>Total reports</dt><dd id="sTotal">0</dd></div>
+    <div class="s-wait"><dt><i data-lucide="clock"></i>Waiting</dt><dd id="sWait">0</dd></div>
+    <div class="s-prog"><dt><i data-lucide="loader"></i>In progress</dt><dd id="sProg">0</dd></div>
+    <div class="s-done"><dt><i data-lucide="check-circle-2"></i>Resolved</dt><dd id="sDone">0</dd></div>
+  </dl>
+  <main>
+    <section class="panel wide reveal" aria-labelledby="h-recent">
+      <h2 id="h-recent"><i data-lucide="history"></i>Recent incidents</h2>
+      <p class="hint">The five newest reports. <a href="records.html">See all records</a></p>
+      <div class="scroll"><table>
+        <thead><tr><th>ID</th><th>Category</th><th>Details</th><th>Status</th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table></div>
+    </section>
+
+    <section class="panel wide reveal" aria-labelledby="h-mine">
+      <h2 id="h-mine"><i data-lucide="user-check"></i>My assignments</h2>
+      <p class="hint">Open incidents assigned to you. <a href="records.html">See all records</a></p>
+      <div class="scroll"><table>
+        <thead><tr><th>ID</th><th>Category</th><th>Details</th><th>Status</th></tr></thead>
+        <tbody id="mine"></tbody>
+      </table></div>
+    </section>
+
+    <section class="panel wide reveal" aria-labelledby="h-predict">
+      <h2 id="h-predict"><i data-lucide="activity"></i>Predicted hotspots (next 7 days)</h2>
+      <p class="hint">Based on incidents per location over the last 30 days. High counts hint at a recurring problem worth a maintenance visit.</p>
+      <div id="predictOut" class="chart-hbars"></div>
+    </section>
+
+    <section class="panel wide reveal" aria-labelledby="h-ai">
+      <h2 id="h-ai"><i data-lucide="sparkles"></i>Incident AI briefing</h2>
+      <p class="hint">Summarizes open incidents for staff. Only report text is sent, never names or photos. Reports and the queue never wait for the AI.</p>
+      <div class="ai-row"><button id="aiSummary"><i data-lucide="wand-2"></i>Summarize open incidents</button><button class="ai-cancel" hidden><i data-lucide="x"></i>Cancel</button></div>
+      <div id="aiOut" class="ai-out" aria-live="polite"></div>
+    </section>
+  </main>
+  <footer class="app-footer">
+    Data is stored only in this browser. On shared devices, clear resolved incidents regularly from <a href="records.html">Incident records</a>.
+  </footer>
+</div>
+<script src="core.js"></script>
+<script src="ai.js"></script>
+<script>
+function pageRender() {
+  fillStats(); showAlert();
+  const sw = document.getElementById('storageWarn');
+  if (sw) sw.innerHTML = storageWarning();
+
+  const list = records.toArray().slice(-5).reverse();
+  $('rows').innerHTML = list.length ? list.map(r =>
+    '<tr class="' + (r.urgent && r.status !== 'Resolved' ? 'urgent' : '') + '"><td class="id">' + r.id + '</td><td>' + esc(r.category) + tagU(r) +
+    '</td><td>' + esc(r.description) + '<div class="small">' + esc(r.location) + ' | ' + relativeTime(r.created) + '</div></td><td>' + pill(r) + '</td></tr>').join('')
+    : '<tr><td colspan="4" class="empty"><i data-lucide="inbox"></i><p>No incidents yet.</p><a class="btn" href="report.html">Report the first one</a></td></tr>';
+
+  const me = localStorage.getItem('incident-desk-me') || '';
+  const mineSection = $('mine').closest('.panel');
+  if (me) {
+    mineSection.style.display = '';
+    const mine = records.toArray().filter(r => cleanName(r.assignee) === cleanName(me) && r.status !== 'Resolved');
+    $('mine').innerHTML = mine.length ? mine.map(r =>
+      '<tr class="' + (r.urgent ? 'urgent' : '') + '"><td class="id">' + r.id + '</td><td>' + esc(r.category) + tagU(r) +
+      '</td><td>' + esc(r.description) + '<div class="small">' + esc(r.location) + ' | ' + relativeTime(r.created) + '</div></td><td>' + pill(r) + '</td></tr>').join('')
+      : '<tr><td colspan="4" class="empty"><i data-lucide="inbox"></i><p>Nothing assigned to you.</p></td></tr>';
+  } else {
+    mineSection.style.display = 'none';
+  }
+
+  predictHotspots();
+  refreshIcons();
+}
+
+function predictHotspots() {
+  const all = records.toArray();
+  const now = Date.now();
+  const windowMs = 30 * 24 * 60 * 60 * 1000;
+  const recent = all.filter(r => now - r.created < windowMs);
+  const byLoc = {};
+  recent.forEach(r => {
+    const k = (r.location || '').trim().toLowerCase();
+    if (!k) return;
+    if (!byLoc[k]) byLoc[k] = { count: 0, urgent: 0, cat: {}, display: r.location };
+    byLoc[k].count++;
+    if (r.urgent) byLoc[k].urgent++;
+    byLoc[k].cat[r.category] = (byLoc[k].cat[r.category] || 0) + 1;
+  });
+  const entries = Object.values(byLoc).filter(x => x.count >= 2);
+  const sorted = insertionSort(entries, (a, b) => b.count - a.count).slice(0, 6);
+  const out = $('predictOut');
+  if (!sorted.length) {
+    out.innerHTML = '<p class="small">Not enough recent incidents to predict hotspots. Keep reporting — data will surface patterns.</p>';
+    return;
+  }
+  const max = sorted[0].count;
+  out.innerHTML = sorted.map(x => {
+    const topCat = Object.entries(x.cat).sort((a, b) => b[1] - a[1])[0];
+    const risk = x.urgent >= 2 ? 'high' : (x.count >= 4 ? 'medium' : 'low');
+    const riskColor = risk === 'high' ? 'var(--red)' : risk === 'medium' ? 'var(--amber)' : 'var(--green)';
+    return '<div class="hbar"><span class="hbar-label" title="' + esc(x.display) + '">' + esc(x.display) + '</span>' +
+      '<div class="hbar-track"><div class="hbar-fill" style="width:' + (x.count / max * 100) + '%;background:' + riskColor + '"></div></div>' +
+      '<span class="hbar-val">' + x.count + '</span></div>' +
+      '<p class="small" style="margin:-6px 0 6px 140px;color:' + riskColor + '">' + risk + ' risk · mostly ' + esc(topCat[0]) + '</p>';
+  }).join('');
+}
+
+(function whoAmI() {
+  const me = localStorage.getItem('incident-desk-me');
+  const label = document.getElementById('whoLabel');
+  if (label) label.textContent = me || 'Set my name';
+  document.getElementById('whoAmI').addEventListener('click', () => {
+    const name = prompt('Your name (used to filter "My assignments"):', me || '');
+    if (name === null) return;
+    if (name.trim()) localStorage.setItem('incident-desk-me', cleanName(name));
+    else localStorage.removeItem('incident-desk-me');
+    location.reload();
+  });
+})();
+
+$('aiSummary').addEventListener('click', async () => {
+  const out = $('aiOut'), btn = $('aiSummary');
+  const open = records.toArray().filter(r => r.status !== 'Resolved').slice(-30);
+  if (!open.length) { out.textContent = 'No open incidents to summarize.'; return; }
+  btn.disabled = true; document.querySelector('.ai-cancel').hidden = false;
+  out.textContent = 'Asking Incident AI... this can take up to 30 seconds.';
+  const lines = open.map(r => [r.id, r.category, r.urgent ? 'URGENT' : 'normal', r.status, r.location, r.description.slice(0, 150)].join(' | ')).join('\n');
+  try { out.textContent = await askAI('You assist school staff. Below are open incident reports (names removed). Write a short plain-text briefing, maximum 150 words, no markdown: one sentence overview, what needs attention first (urgent before others), and any patterns such as repeated locations.\n\n' + lines); }
+  catch (err) { out.textContent = err.message; }
+  btn.disabled = false; document.querySelector('.ai-cancel').hidden = true;
+});
+render();
+</script>
+</body>
+</html>
