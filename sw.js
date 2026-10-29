@@ -1,7 +1,15 @@
-const CACHE = 'incident-desk-v5';
+const CACHE = 'incident-desk-v6';
 const ASSETS = [
-  './', './index.html', './report.html', './queue.html', './records.html', './analytics.html',
-  './style.css?v=5', './core.js', './ai.js'
+  './', 
+  './index.html', 
+  './report.html', 
+  './queue.html', 
+  './records.html', 
+  './analytics.html',
+  './style.css?v=5', 
+  './core.js', 
+  './ai.js',
+  'https://unpkg.com/lucide@latest/dist/umd/lucide.min.js' // <--- ADDED THIS
 ];
 
 self.addEventListener('install', e => {
@@ -18,8 +26,12 @@ self.addEventListener('activate', e => {
 
 self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
+  
+  // ONLY skip caching for the AI server
   if (url.hostname === 'oxford.uk.eu.org') return;
-  if (url.hostname.includes('googleapis') || url.hostname.includes('gstatic') || url.hostname.includes('unpkg')) return;
+  
+  // (We removed the googleapis and unpkg skip, so it caches them now)
+  
   e.respondWith(
     caches.match(e.request).then(cached => cached || fetch(e.request).then(res => {
       if (res.ok && e.request.method === 'GET') {
